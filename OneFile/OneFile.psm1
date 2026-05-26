@@ -10,7 +10,8 @@
     Two authentication methods are supported:
       • Credential  — GitHub username and password / personal access token,
                       using the GitHub REST API over HTTPS.
-      • SshKey      — path to an SSH private key, using git-archive over SSH.
+      • GhCli       — the GitHub CLI (gh) using its configured credentials,
+                      accessed via the GitHub REST API.
 #>
 
 Set-StrictMode -Version Latest
@@ -66,61 +67,31 @@ function Invoke-GitHubApiDownload {
     [IO.File]::WriteAllBytes($OutputPath, $bytes)
 }
 
-function Invoke-GitArchiveDownload {
+function Invoke-GhCliDownload {
     <#
     .SYNOPSIS
-        Download a file via git-archive over SSH.
+        Download a file via the GitHub API using the gh CLI.
     #>
     [CmdletBinding()]
     param(
         [string] $Repository,
         [string] $FilePath,
         [string] $Ref,
-        [string] $SshKeyPath,
         [string] $OutputPath
     )
 
-    foreach ($cmd in 'git', 'tar') {
-        if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
-            throw "'$cmd' is required for SSH key authentication but was not found in PATH."
-        }
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        throw "'gh' (GitHub CLI) is required but was not found in PATH. Install from https://cli.github.com/ and run 'gh auth login'."
     }
 
-    if (-not (Test-Path $SshKeyPath -PathType Leaf)) {
-        throw "SSH key file not found: $SshKeyPath"
-    }
+    $apiPath = "repos/${Repository}/contents/${FilePath}?ref=${Ref}"
 
-    $sshKeyPath = (Resolve-Path $SshKeyPath).Path
+    Write-Verbose "gh api $apiPath"
 
-    # Build a cross-platform SSH command that points git at the specified key.
-    $env:GIT_SSH_COMMAND = "ssh -i `"$sshKeyPath`" -o StrictHostKeyChecking=no -o BatchMode=yes"
+    & gh api $apiPath --header 'Accept: application/vnd.github.raw' --output $OutputPath
 
-    $remote = "git@github.com:${Repository}.git"
-
-    Write-Verbose "git archive --remote=$remote $Ref $FilePath"
-
-    try {
-        # git archive emits a TAR stream; pipe it straight to tar to extract the
-        # single file to stdout, then write the bytes to OutputPath.
-        $tarBytes = & git archive --remote=$remote $Ref $FilePath |
-                    & tar --extract --to-stdout $FilePath
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "git archive or tar exited with code $LASTEXITCODE."
-        }
-
-        # $tarBytes may be a byte array or an array of strings depending on the
-        # platform; normalise to bytes and write.
-        if ($tarBytes -is [byte[]]) {
-            [IO.File]::WriteAllBytes($OutputPath, $tarBytes)
-        }
-        else {
-            $text = $tarBytes -join "`n"
-            [IO.File]::WriteAllText($OutputPath, $text)
-        }
-    }
-    finally {
-        Remove-Item Env:\GIT_SSH_COMMAND -ErrorAction SilentlyContinue
+    if ($LASTEXITCODE -ne 0) {
+        throw "gh api exited with code $LASTEXITCODE."
     }
 }
 
@@ -143,10 +114,9 @@ function Get-GitHubFile {
                         token). The file is fetched via the GitHub REST API
                         over HTTPS.
 
-        • SshKey      — supply -SshKeyPath (path to an SSH private key that
-                        is authorised for the repository). The file is
-                        fetched using 'git archive --remote' over SSH, so
-                        git and tar must be available in PATH.
+        • GhCli       — supply -UseGhCli. The file is fetched via the GitHub
+                        REST API using the gh CLI and its configured
+                        credentials (run 'gh auth login' beforehand).
 
     .PARAMETER Repository
         The repository in "OWNER/REPO" format, e.g. 'octocat/Hello-World'.
@@ -167,8 +137,9 @@ function Get-GitHubFile {
     .PARAMETER Password
         GitHub password or personal access token. Used with -Username.
 
-    .PARAMETER SshKeyPath
-        Path to the SSH private key. Used in the SshKey parameter set.
+    .PARAMETER UseGhCli
+        Use the GitHub CLI (gh) and its configured credentials.
+        Run 'gh auth login' before using this parameter.
 
     .EXAMPLE
         # HTTPS — username and personal access token
@@ -187,18 +158,18 @@ function Get-GitHubFile {
                        -Password    'ghp_myPersonalAccessToken'
 
     .EXAMPLE
-        # SSH key — default ref and output path
+        # gh CLI — default ref and output path
         Get-GitHubFile -Repository 'octocat/Hello-World' `
                        -FilePath   'README.md' `
-                       -SshKeyPath '~/.ssh/id_rsa'
+                       -UseGhCli
 
     .EXAMPLE
-        # SSH key — explicit branch and output path
+        # gh CLI — explicit branch and output path
         Get-GitHubFile -Repository  'octocat/Hello-World' `
                        -FilePath    'src/main.py' `
                        -Ref         'develop' `
                        -OutputPath  '.\downloaded_main.py' `
-                       -SshKeyPath  '~/.ssh/id_ed25519'
+                       -UseGhCli
 
     .OUTPUTS
         System.IO.FileInfo
@@ -231,10 +202,10 @@ function Get-GitHubFile {
             HelpMessage = 'GitHub password or personal access token.')]
         [string] $Password,
 
-        # --- SshKey parameter set ---
-        [Parameter(Mandatory, ParameterSetName = 'SshKey',
-            HelpMessage = 'Path to the SSH private key.')]
-        [string] $SshKeyPath
+        # --- GhCli parameter set ---
+        [Parameter(Mandatory, ParameterSetName = 'GhCli',
+            HelpMessage = 'Use the GitHub CLI (gh) and its configured credentials.')]
+        [switch] $UseGhCli
     )
 
     # Resolve default output path.
@@ -255,13 +226,12 @@ function Get-GitHubFile {
                 -OutputPath $OutputPath
         }
 
-        'SshKey' {
-            Write-Host "Downloading '$FilePath' from '$Repository' via SSH key..."
-            Invoke-GitArchiveDownload `
+        'GhCli' {
+            Write-Host "Downloading '$FilePath' from '$Repository' via GitHub API (gh CLI)..."
+            Invoke-GhCliDownload `
                 -Repository $Repository `
                 -FilePath   $FilePath `
                 -Ref        $Ref `
-                -SshKeyPath $SshKeyPath `
                 -OutputPath $OutputPath
         }
     }

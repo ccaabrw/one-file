@@ -2,12 +2,13 @@
 # download-one-file.sh — Download a single file from a GitHub repository.
 #
 # Authentication is by username/password (or personal access token) using
-# the GitHub API over HTTPS, or by SSH private key using git-archive.
+# the GitHub API over HTTPS, or by the GitHub CLI (gh) using its configured
+# credentials.
 # Only the requested file is transferred; the repository is never cloned.
 #
 # Dependencies:
 #   Username/password mode: curl, and one of: python3 | python | (jq + base64)
-#   SSH key mode          : git, ssh, tar
+#   gh CLI mode           : gh (GitHub CLI, https://cli.github.com/)
 
 set -euo pipefail
 
@@ -23,7 +24,7 @@ Download a single file from a GitHub repository without cloning the full repo.
 Authentication (choose one):
   -u USERNAME    GitHub username
   -p PASSWORD    GitHub password or personal access token
-  -k KEY_PATH    Path to SSH private key
+  -g             Use the GitHub CLI (gh) and its configured credentials
 
 Required:
   -r OWNER/REPO  Repository (e.g. octocat/Hello-World)
@@ -42,11 +43,11 @@ Examples:
   $(basename "$0") -u myuser -p ghp_mytoken -r octocat/Hello-World \\
       -f src/main.py -b develop -o ./downloaded_main.py
 
-  # SSH key
-  $(basename "$0") -k ~/.ssh/id_rsa -r octocat/Hello-World -f README.md
+  # gh CLI (run 'gh auth login' first)
+  $(basename "$0") -g -r octocat/Hello-World -f README.md
 
-  # SSH key — with explicit branch and output path
-  $(basename "$0") -k ~/.ssh/id_rsa -r octocat/Hello-World \\
+  # gh CLI — with explicit branch and output path
+  $(basename "$0") -g -r octocat/Hello-World \\
       -f src/main.py -b develop -o ./downloaded_main.py
 EOF
 }
@@ -56,17 +57,17 @@ EOF
 # ---------------------------------------------------------------------------
 USERNAME=""
 PASSWORD=""
-SSH_KEY=""
+USE_GH_CLI=""
 REPO=""
 FILE_PATH=""
 BRANCH="HEAD"
 OUTPUT=""
 
-while getopts "u:p:k:r:f:b:o:h" opt; do
+while getopts "u:p:gr:f:b:o:h" opt; do
     case "$opt" in
         u) USERNAME="$OPTARG" ;;
         p) PASSWORD="$OPTARG" ;;
-        k) SSH_KEY="$OPTARG" ;;
+        g) USE_GH_CLI=1 ;;
         r) REPO="$OPTARG" ;;
         f) FILE_PATH="$OPTARG" ;;
         b) BRANCH="$OPTARG" ;;
@@ -118,29 +119,19 @@ decode_github_base64() {
 }
 
 # ---------------------------------------------------------------------------
-# SSH key mode — uses git-archive which transfers only the requested path
+# gh CLI mode — uses the GitHub API via the gh CLI
 # ---------------------------------------------------------------------------
-if [ -n "$SSH_KEY" ]; then
-    if ! command -v git &>/dev/null; then
-        echo "Error: git is required for SSH key authentication." >&2
+if [ -n "$USE_GH_CLI" ]; then
+    if ! command -v gh &>/dev/null; then
+        echo "Error: gh (GitHub CLI) is required. Install from https://cli.github.com/ and run 'gh auth login'." >&2
         exit 1
     fi
 
-    if [ ! -f "$SSH_KEY" ]; then
-        echo "Error: SSH key file not found: $SSH_KEY" >&2
-        exit 1
-    fi
+    echo "Downloading '${FILE_PATH}' from '${REPO}' via GitHub API (gh CLI)..."
 
-    echo "Downloading '${FILE_PATH}' from '${REPO}' via SSH key..."
-
-    export GIT_SSH_COMMAND="ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no -o BatchMode=yes"
-
-    git archive \
-        --remote="git@github.com:${REPO}.git" \
-        "$BRANCH" \
-        "$FILE_PATH" \
-        | tar --extract --to-stdout "$FILE_PATH" \
-        > "$OUTPUT"
+    gh api "repos/${REPO}/contents/${FILE_PATH}?ref=${BRANCH}" \
+        --header "Accept: application/vnd.github.raw" \
+        --output "$OUTPUT"
 
     echo "Saved to: ${OUTPUT}"
     exit 0
@@ -212,6 +203,6 @@ fi
 # ---------------------------------------------------------------------------
 # no valid auth combination provided
 # ---------------------------------------------------------------------------
-echo "Error: provide either an SSH key (-k) or both a username (-u) and password/token (-p)." >&2
+echo "Error: provide either -g (gh CLI) or both a username (-u) and password/token (-p)." >&2
 usage >&2
 exit 1
